@@ -3,7 +3,7 @@ This is the agent that handles all security related events as well as blocking o
 
 ## Features
 1. Pushes security events to the cloud (will add the demo server for this soon)
-2. Blocks IP addresses by adding them to the windows firewall.
+2. Blocks IP addresses by adding them to the windows firewall. This feature is working and has been tested on both Windows 10 and Windows 11 machines. 
 
 ## Installation
 For the time being, please use either an IDE of your choosing and import the existing dotnet solution. Either that or you can download the run the executable directly.
