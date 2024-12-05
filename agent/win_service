@@ -1,0 +1,11 @@
+1. Install as service
+
+Post Install steps:
+
+1. watchtower add-machine <machine code here>
+2. watchtower status
+This should give the following:
+a. events sent
+b. events that couldn't be sent
+3. watchtower stop
+4. watchtower restart
