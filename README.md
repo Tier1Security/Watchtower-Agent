@@ -9,5 +9,8 @@ This is the agent that handles all security related events as well as blocking o
 For the time being, please use either an IDE of your choosing and import the existing dotnet solution. Either that or you can download the run the executable directly.
 
 ## Usage
-If you don't specify where to send the data, the script will still run. It just won't send any security related data. It will still block IP addresses that try to brute force into machines. 
+
+Important: must be run with Administrator privileges as reading Security Event Logs from Windows needs elevated privileges. 
+
+If you don't specify where to send the data, the script will still run. It just won't send any security related data anywhere. It will still block IP addresses that try to brute force into machines. 
 
