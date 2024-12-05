@@ -11,7 +11,7 @@ namespace Agent
 {
     class Program
     {
-        private const string MachineID = "Win11-Virtual_Machine-- DEMO";
+        private const string MachineID = "";
         private const string ApiUrl = "";
         private static readonly HttpClient HttpClient = new HttpClient();
         private static DateTime _lastSentTime;
