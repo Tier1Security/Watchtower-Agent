@@ -15,5 +15,5 @@ Important: must be run with Administrator privileges as reading Security Event L
 If you don't specify where to send the data, the script will still run. It just won't send any security related data anywhere. It will still block IP addresses that try to brute force into machines. 
 
 ## Future
-We are in the process of converting this script into a daemon so that it can in the background as a windows service. The implementation will resemble CLI applications where the user can start/stop/ query the status of the program all through CMD or Powershell like the popular DNS sinkhole PiHole: https://pi-hole.net/
+We are in the process of converting this script into a daemon so that it can in the background as a Windows service. The implementation will resemble CLI applications where the user can start/stop/ query the status of the program all through CMD or Powershell like the popular DNS sinkhole PiHole: https://pi-hole.net/
 
