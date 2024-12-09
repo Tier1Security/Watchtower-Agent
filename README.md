@@ -1,5 +1,5 @@
 
-![watchtower-min](https://github.com/user-attachments/assets/18be0df7-9c37-4a73-be46-803259b3f703)
+![watchtower-min](https://github.com/user-attachments/assets/4e95037b-2dfd-4267-a8cc-6c4bfb430090)
 
 
 This is the agent that handles all security related events as well as blocking of IP's that try to brute force into Windows machines. This is part of an Watchtower SIEM/IPS solution made by Tier 1 Security. It uses less than 25MB of ram and less than 1% of CPU during runtime. 
