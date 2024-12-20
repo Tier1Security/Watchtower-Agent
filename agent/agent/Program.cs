@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -11,80 +12,61 @@ using Newtonsoft.Json;
 
 namespace Agent
 {
+    // Define the EventPayload class
+    public class EventPayload
+    {
+        [JsonProperty("event_id")]
+        public int EventId { get; set; }
+
+        [JsonProperty("license")]
+        public string License { get; set; }
+
+        [JsonProperty("category_number")]
+        public int CategoryNumber { get; set; }
+
+        [JsonProperty("log_index")]
+        public int LogIndex { get; set; }
+
+        [JsonProperty("timestamp")]
+        public string Timestamp { get; set; }
+
+        [JsonProperty("ip")]
+        public string Ip { get; set; }
+
+        [JsonProperty("attempts")]
+        public int Attempts { get; set; }
+
+        [JsonProperty("blocked_ip")]
+        public string? BlockedIp { get; set; }
+    }
+
     class Program
     {
-        // Identifier for the machine on which this agent runs
-        private const string MachineID = "Win11-Virtual_Machine-- DEMO";
+        private const string license = "<LICENSE_KEY>";
+        private const string ApiUrl = "http://localhost:5000/api";
 
-        // Using HTTP URL
-        private const string ApiUrl = "http://192.168.1.171:5000/api";
+        // Threshold for failed login attempts
+        private const int FailedLoginThreshold = 5;
 
         private static readonly HttpClient HttpClient = new HttpClient();
-
-        private static DateTime _lastSentTime;
-        private static readonly object _lastSentTimeLock = new object();
-
         private static readonly HashSet<int> MonitoredEventIDs = new()
         {
-            104,
-            106,
-            201,
-            740,
-            741,
-            1102,
-            1116,
-            1118,
-            1119,
-            1120,
-            4624,
-            4625,
-            4634,
-            4647,
-            4648,
-            4656,
-            4672,
-            4697,
-            4698,
-            4699,
-            4700,
-            4701,
-            4702,
-            4719,
-            4720,
-            4722,
-            4724,
-            4728,
-            4732,
-            4738,
-            4756,
-            4768,
-            4769,
-            4771,
-            4776,
-            5001,
-            5140,
-            5142,
-            5145,
-            5157,
-            7034,
-            7036,
-            7040,
-            7045,
+            104, 106, 201, 740, 741, 1102, 1116, 1118, 1119, 1120,
+            4624, 4625, 4634, 4647, 4648, 4656, 4672, 4697, 4698,
+            4699, 4700, 4701, 4702, 4719, 4720, 4722, 4724, 4728,
+            4732, 4738, 4756, 4768, 4769, 4771, 4776, 5001, 5140,
+            5142, 5145, 5157, 7034, 7036, 7040, 7045,
         };
 
-        private const int FailedLoginThreshold = 3;
-        private static readonly TimeSpan MonitoringWindow = TimeSpan.FromMinutes(15);
-
         private static readonly ConcurrentDictionary<string, int> FailedLoginAttempts = new();
+        private static readonly HashSet<string> SentLogHashes = new();
+        private static readonly object LogHashLock = new();
+        private static DateTime ProgramStartTime;
 
         static async Task Main()
         {
-            lock (_lastSentTimeLock)
-            {
-                _lastSentTime = DateTime.Now;
-            }
+            ProgramStartTime = DateTime.Now; // Record the program's start time
 
-            // Verify that the configured API URL is valid and uses HTTP
             if (!IsApiUrlValid(ApiUrl))
             {
                 Console.WriteLine("API URL is not properly set. Exiting...");
@@ -106,78 +88,75 @@ namespace Agent
 
         private static async Task ProcessEventLogAsync(EventLogEntry entry)
         {
+            // Ignore events that occurred before the program started
+            if (entry.TimeGenerated < ProgramStartTime)
+            {
+                Console.WriteLine($"Skipping old EventID: {entry.EventID}, Time: {entry.TimeGenerated}");
+                return;
+            }
+
             if (!MonitoredEventIDs.Contains(entry.EventID))
                 return;
-            if (!IsNewLogEntry(entry))
-                return;
 
-            var generalPayload = new
+            if (IsDuplicateLog(entry))
             {
-                event_id = entry.EventID,
-                machine_id = MachineID,
-                category_number = entry.CategoryNumber,
-                log_index = entry.Index,
-                timestamp = entry.TimeGenerated.ToString("o"),
-            };
+                Console.WriteLine($"Duplicate log detected. Skipping EventID: {entry.EventID}, Index: {entry.Index}");
+                return;
+            }
 
-            await SendDataAsync(generalPayload);
+            if (entry.EventID != 4625)
+            {
+                var generalPayload = new EventPayload
+                {
+                    EventId = entry.EventID,
+                    License = license,
+                    CategoryNumber = entry.CategoryNumber,
+                    LogIndex = entry.Index,
+                    Timestamp = entry.TimeGenerated.ToString("o"),
+                    Ip = string.Empty,
+                    Attempts = 0,
+                    BlockedIp = null,
+                };
+
+                await SendDataAsync(generalPayload);
+            }
 
             if (entry.EventID == 4625)
             {
                 await HandleFailedLoginAsync(entry);
             }
+        }
 
-            lock (_lastSentTimeLock)
+        private static bool IsDuplicateLog(EventLogEntry entry)
+        {
+            // Compute a hash for the event
+            string logHash = ComputeLogHash(entry);
+
+            lock (LogHashLock)
             {
-                if (entry.TimeGenerated > _lastSentTime)
+                if (SentLogHashes.Contains(logHash))
                 {
-                    _lastSentTime = entry.TimeGenerated;
+                    return true;
                 }
+
+                SentLogHashes.Add(logHash);
+
+                // Prevent memory bloat by limiting the size of the hash set
+                if (SentLogHashes.Count > 5000)
+                {
+                    SentLogHashes.Clear();
+                }
+
+                return false;
             }
         }
 
-        private static bool IsNewLogEntry(EventLogEntry entry)
+        private static string ComputeLogHash(EventLogEntry entry)
         {
-            lock (_lastSentTimeLock)
-            {
-                return entry.TimeGenerated > _lastSentTime;
-            }
-        }
-
-        private static async Task SendDataAsync(object payload)
-        {
-            if (string.IsNullOrEmpty(ApiUrl))
-            {
-                Console.WriteLine("API URL is not set. Data will not be sent.");
-                return;
-            }
-
-            try
-            {
-                string jsonData = JsonConvert.SerializeObject(payload);
-                var content = new StringContent(jsonData, Encoding.UTF8, "application/json");
-                var response = await HttpClient.PostAsync(ApiUrl, content);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    string responseBody = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine(
-                        $"POST request failed: {response.StatusCode} - {responseBody}"
-                    );
-                }
-                else
-                {
-                    Console.WriteLine("POST request successful!");
-                }
-            }
-            catch (HttpRequestException ex)
-            {
-                Console.WriteLine($"HTTP Request Exception: {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Exception occurred: {ex.Message}\n{ex.StackTrace}");
-            }
+            using var sha256 = SHA256.Create();
+            string logData = $"{entry.Index}-{entry.TimeGenerated}-{entry.EventID}-{entry.Message}";
+            byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(logData));
+            return Convert.ToBase64String(hashBytes);
         }
 
         private static async Task HandleFailedLoginAsync(EventLogEntry entry)
@@ -186,31 +165,56 @@ namespace Agent
 
             if (string.IsNullOrEmpty(ipAddress) || !IPAddress.TryParse(ipAddress, out _))
             {
+                Console.WriteLine($"Invalid or missing IP address in event {entry.Index}.");
                 return;
             }
 
-            IncrementFailedLoginAttempt(ipAddress);
+            lock (FailedLoginAttempts)
+            {
+                IncrementFailedLoginAttempt(ipAddress);
+            }
 
             int attempts = FailedLoginAttempts[ipAddress];
             bool shouldBlock = attempts >= FailedLoginThreshold && !IsLocalhost(ipAddress);
 
-            var eventPayload = new
-            {
-                event_id = 4625,
-                machine_id = MachineID,
-                category_number = entry.CategoryNumber,
-                log_index = entry.Index,
-                timestamp = entry.TimeGenerated.ToString("o"),
-                ip = ipAddress,
-                attempts = attempts,
-                blocked_ip = shouldBlock ? ipAddress : null,
-            };
-
-            await SendDataAsync(eventPayload);
-
             if (shouldBlock && BlockIp(ipAddress))
             {
-                FailedLoginAttempts[ipAddress] = 0;
+                lock (FailedLoginAttempts)
+                {
+                    FailedLoginAttempts[ipAddress] = 0;
+                }
+
+                var eventPayload = new EventPayload
+                {
+                    EventId = 4625,
+                    License = license,
+                    CategoryNumber = entry.CategoryNumber,
+                    LogIndex = entry.Index,
+                    Timestamp = entry.TimeGenerated.ToString("o"),
+                    Ip = ipAddress,
+                    Attempts = attempts,
+                    BlockedIp = ipAddress,
+                };
+
+                Console.WriteLine($"IP {ipAddress} has been blocked after {attempts} failed attempts.");
+                await SendDataAsync(eventPayload);
+            }
+            else
+            {
+                var eventPayload = new EventPayload
+                {
+                    EventId = 4625,
+                    License = license,
+                    CategoryNumber = entry.CategoryNumber,
+                    LogIndex = entry.Index,
+                    Timestamp = entry.TimeGenerated.ToString("o"),
+                    Ip = ipAddress,
+                    Attempts = attempts,
+                    BlockedIp = null,
+                };
+
+                Console.WriteLine($"Failed login attempt {attempts} for IP {ipAddress}.");
+                await SendDataAsync(eventPayload);
             }
         }
 
@@ -243,15 +247,13 @@ namespace Agent
                 return false;
             }
 
-            string command =
-                $"netsh advfirewall firewall add rule name=\"Block {ipAddress}\" dir=in action=block remoteip={ipAddress}";
+            string command = $"netsh advfirewall firewall add rule name=\"Block {ipAddress}\" dir=in action=block remoteip={ipAddress}";
             return ExecuteCommand(command);
         }
 
         private static bool IsIpBlocked(string ipAddress)
         {
-            string checkCommand =
-                $"netsh advfirewall firewall show rule name=all | findstr \"{ipAddress}\"";
+            string checkCommand = $"netsh advfirewall firewall show rule name=all | findstr \"{ipAddress}\"";
             string output = ExecuteCommandWithOutput(checkCommand);
             return !string.IsNullOrEmpty(output);
         }
@@ -308,9 +310,40 @@ namespace Agent
             }
         }
 
-        /// <summary>
-        /// Validates that the provided API URL is a non-empty URL using HTTP.
-        /// </summary>
+        private static async Task SendDataAsync(EventPayload payload)
+        {
+            if (string.IsNullOrEmpty(ApiUrl))
+            {
+                Console.WriteLine("API URL is not set. Data will not be sent.");
+                return;
+            }
+
+            try
+            {
+                string jsonData = JsonConvert.SerializeObject(payload);
+                var content = new StringContent(jsonData, Encoding.UTF8, "application/json");
+                var response = await HttpClient.PostAsync(ApiUrl, content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    string responseBody = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"POST request failed for event_id {payload.EventId}: {response.StatusCode} - {responseBody}");
+                }
+                else
+                {
+                    Console.WriteLine($"POST request successful for event_id {payload.EventId}!");
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"HTTP Request Exception for event_id {payload.EventId}: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception occurred for event_id {payload.EventId}: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
         private static bool IsApiUrlValid(string url)
         {
             if (string.IsNullOrWhiteSpace(url))
@@ -318,8 +351,7 @@ namespace Agent
 
             if (Uri.TryCreate(url, UriKind.Absolute, out var uriResult))
             {
-                // Allow only HTTP
-                return uriResult.Scheme == Uri.UriSchemeHttp;
+                return uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps;
             }
 
             return false;

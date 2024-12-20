@@ -1192,11 +1192,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\raiden\\Documents\\Github\\dotnet_ips\\agent\\agent\\agent.csproj",
+      "projectUniqueName": "C:\\Mac\\Home\\Documents\\projects\\Watchtower-Agent\\agent\\agent\\agent.csproj",
       "projectName": "agent",
-      "projectPath": "C:\\Users\\raiden\\Documents\\Github\\dotnet_ips\\agent\\agent\\agent.csproj",
+      "projectPath": "C:\\Mac\\Home\\Documents\\projects\\Watchtower-Agent\\agent\\agent\\agent.csproj",
       "packagesPath": "C:\\Users\\raiden\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\raiden\\Documents\\Github\\dotnet_ips\\agent\\agent\\obj\\",
+      "outputPath": "C:\\Mac\\Home\\Documents\\projects\\Watchtower-Agent\\agent\\agent\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\raiden\\AppData\\Roaming\\NuGet\\NuGet.Config"
@@ -1221,7 +1221,7 @@
       "restoreAuditProperties": {
         "enableAudit": "true",
         "auditLevel": "low",
-        "auditMode": "direct"
+        "auditMode": "all"
       },
       "SdkAnalysisLevel": "9.0.100"
     },
@@ -1259,7 +1259,7 @@
             "version": "[8.0.11, 8.0.11]"
           },
           {
-            "name": "Microsoft.NETCore.App.Host.win-x64",
+            "name": "Microsoft.NETCore.App.Host.win-arm64",
             "version": "[8.0.11, 8.0.11]"
           },
           {
@@ -1276,7 +1276,7 @@
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.101/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.100/PortableRuntimeIdentifierGraph.json"
       }
     }
   }
