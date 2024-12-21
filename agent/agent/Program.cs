@@ -43,7 +43,7 @@ namespace Agent
     class Program
     {
         private const string license = "<LICENSE_KEY>";
-        private const string ApiUrl = "http://localhost:5000/api";
+        private const string ApiUrl = "https://www.tier1security.org/api";
 
         // Threshold for failed login attempts
         private const int FailedLoginThreshold = 5;
