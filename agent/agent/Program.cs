@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,34 +12,63 @@ using Newtonsoft.Json;
 
 namespace Agent
 {
-    // Define the EventPayload class
+    /// <summary>
+    /// Represents the payload structure for sending event data to the remote API.
+    /// </summary>
     public class EventPayload
     {
+        /// <summary>
+        /// Gets or sets the ID of the event.
+        /// </summary>
         [JsonProperty("event_id")]
         public int EventId { get; set; }
 
+        /// <summary>
+        /// Gets or sets the license key associated with the event.
+        /// </summary>
         [JsonProperty("license")]
         public string License { get; set; }
 
+        /// <summary>
+        /// Gets or sets the category number of the event.
+        /// </summary>
         [JsonProperty("category_number")]
         public int CategoryNumber { get; set; }
 
+        /// <summary>
+        /// Gets or sets the index (sequence number) of the log in the event log.
+        /// </summary>
         [JsonProperty("log_index")]
         public int LogIndex { get; set; }
 
+        /// <summary>
+        /// Gets or sets the timestamp of the event in ISO 8601 format.
+        /// </summary>
         [JsonProperty("timestamp")]
         public string Timestamp { get; set; }
 
+        /// <summary>
+        /// Gets or sets the IP address associated with the event.
+        /// </summary>
         [JsonProperty("ip")]
         public string Ip { get; set; }
 
+        /// <summary>
+        /// Gets or sets the number of failed login attempts associated with this IP address.
+        /// </summary>
         [JsonProperty("attempts")]
         public int Attempts { get; set; }
 
+        /// <summary>
+        /// Gets or sets the IP address that was blocked, if any.
+        /// </summary>
         [JsonProperty("blocked_ip")]
         public string? BlockedIp { get; set; }
     }
 
+    /// <summary>
+    /// Program class containing the main entry point and logic for monitoring Windows Security Event Logs.
+    /// </summary>
     class Program
     {
         private const string license = "<LICENSE_KEY>";
@@ -63,6 +92,9 @@ namespace Agent
         private static readonly object LogHashLock = new();
         private static DateTime ProgramStartTime;
 
+        /// <summary>
+        /// The main entry point for the program. Checks the API URL validity and initiates event parsing if valid.
+        /// </summary>
         static async Task Main()
         {
             ProgramStartTime = DateTime.Now; // Record the program's start time
@@ -76,6 +108,9 @@ namespace Agent
             await StartEventParsingAsync();
         }
 
+        /// <summary>
+        /// Starts monitoring the Windows Security Event Log asynchronously and waits for user input to exit.
+        /// </summary>
         private static async Task StartEventParsingAsync()
         {
             using var eventLog = new EventLog("Security") { EnableRaisingEvents = true };
@@ -86,6 +121,10 @@ namespace Agent
             await Task.Run(() => Console.ReadKey());
         }
 
+        /// <summary>
+        /// Processes an individual EventLogEntry. Filters old events, checks for duplicates, and sends data if necessary.
+        /// </summary>
+        /// <param name="entry">The event log entry to process.</param>
         private static async Task ProcessEventLogAsync(EventLogEntry entry)
         {
             // Ignore events that occurred before the program started
@@ -104,6 +143,7 @@ namespace Agent
                 return;
             }
 
+            // Handle non-failed login events immediately
             if (entry.EventID != 4625)
             {
                 var generalPayload = new EventPayload
@@ -121,12 +161,18 @@ namespace Agent
                 await SendDataAsync(generalPayload);
             }
 
+            // Handle failed login events (EventID 4625)
             if (entry.EventID == 4625)
             {
                 await HandleFailedLoginAsync(entry);
             }
         }
 
+        /// <summary>
+        /// Checks if the given event log entry was already processed by comparing a computed hash of its contents.
+        /// </summary>
+        /// <param name="entry">The event log entry to check.</param>
+        /// <returns>True if the log has already been processed, false otherwise.</returns>
         private static bool IsDuplicateLog(EventLogEntry entry)
         {
             // Compute a hash for the event
@@ -151,6 +197,11 @@ namespace Agent
             }
         }
 
+        /// <summary>
+        /// Computes a SHA-256 hash for the event log entry.
+        /// </summary>
+        /// <param name="entry">The event log entry for which to compute the hash.</param>
+        /// <returns>A Base64 string representation of the event log hash.</returns>
         private static string ComputeLogHash(EventLogEntry entry)
         {
             using var sha256 = SHA256.Create();
@@ -159,6 +210,10 @@ namespace Agent
             return Convert.ToBase64String(hashBytes);
         }
 
+        /// <summary>
+        /// Handles a failed login event by extracting the IP, incrementing its failed count, and optionally blocking it.
+        /// </summary>
+        /// <param name="entry">The failed login event log entry.</param>
         private static async Task HandleFailedLoginAsync(EventLogEntry entry)
         {
             string ipAddress = ExtractIPAddress(entry.Message);
@@ -218,14 +273,28 @@ namespace Agent
             }
         }
 
+        /// <summary>
+        /// Increments the failed login attempt count for the specified IP address.
+        /// </summary>
+        /// <param name="ipAddress">The IP address for which to increment the failed attempt count.</param>
         private static void IncrementFailedLoginAttempt(string ipAddress)
         {
             FailedLoginAttempts.AddOrUpdate(ipAddress, 1, (_, oldValue) => oldValue + 1);
         }
 
+        /// <summary>
+        /// Checks if the given IP address is a localhost address.
+        /// </summary>
+        /// <param name="ipAddress">The IP address to check.</param>
+        /// <returns>True if the IP address is localhost, false otherwise.</returns>
         private static bool IsLocalhost(string ipAddress) =>
             ipAddress == "127.0.0.1" || ipAddress == "::1";
 
+        /// <summary>
+        /// Extracts an IP address from the event message using a regular expression.
+        /// </summary>
+        /// <param name="message">The message from which to extract the IP address.</param>
+        /// <returns>The extracted IP address, or null if none was found.</returns>
         private static string ExtractIPAddress(string message)
         {
             const string ipPattern = @"(?<=Source Network Address:\s)([^\s]+)";
@@ -233,6 +302,11 @@ namespace Agent
             return match.Success ? match.Value : null;
         }
 
+        /// <summary>
+        /// Blocks the specified IP address using Windows Firewall rules, if it is not already blocked.
+        /// </summary>
+        /// <param name="ipAddress">The IP address to block.</param>
+        /// <returns>True if the IP was successfully blocked, false otherwise.</returns>
         private static bool BlockIp(string ipAddress)
         {
             if (IsIpBlocked(ipAddress))
@@ -251,6 +325,11 @@ namespace Agent
             return ExecuteCommand(command);
         }
 
+        /// <summary>
+        /// Checks whether the given IP address is already blocked by querying Windows Firewall rules.
+        /// </summary>
+        /// <param name="ipAddress">The IP address to check.</param>
+        /// <returns>True if the IP address is already blocked, false otherwise.</returns>
         private static bool IsIpBlocked(string ipAddress)
         {
             string checkCommand = $"netsh advfirewall firewall show rule name=all | findstr \"{ipAddress}\"";
@@ -258,6 +337,11 @@ namespace Agent
             return !string.IsNullOrEmpty(output);
         }
 
+        /// <summary>
+        /// Executes a command silently using cmd.exe without capturing output.
+        /// </summary>
+        /// <param name="command">The command to execute.</param>
+        /// <returns>True if the command executed successfully, false otherwise.</returns>
         private static bool ExecuteCommand(string command)
         {
             try
@@ -283,6 +367,11 @@ namespace Agent
             }
         }
 
+        /// <summary>
+        /// Executes a command silently using cmd.exe and captures the standard output.
+        /// </summary>
+        /// <param name="command">The command to execute.</param>
+        /// <returns>The standard output from the command, or an empty string if an error occurred.</returns>
         private static string ExecuteCommandWithOutput(string command)
         {
             try
@@ -310,6 +399,10 @@ namespace Agent
             }
         }
 
+        /// <summary>
+        /// Sends event data asynchronously to the configured API endpoint.
+        /// </summary>
+        /// <param name="payload">The event payload to send.</param>
         private static async Task SendDataAsync(EventPayload payload)
         {
             if (string.IsNullOrEmpty(ApiUrl))
@@ -344,6 +437,11 @@ namespace Agent
             }
         }
 
+        /// <summary>
+        /// Checks if the provided URL is valid (non-empty, well-formed, and uses HTTP or HTTPS).
+        /// </summary>
+        /// <param name="url">The API URL to validate.</param>
+        /// <returns>True if the URL is valid, false otherwise.</returns>
         private static bool IsApiUrlValid(string url)
         {
             if (string.IsNullOrWhiteSpace(url))
