@@ -9,7 +9,24 @@ This is the agent that handles all security related events as well as blocking o
 2. Blocks IP addresses by adding them to the windows firewall. This feature is working and has been tested on both Windows 10 and Windows 11 machines. 
 
 ## Installation
-For the time being, please use either an IDE of your choosing and import the existing dotnet solution. Either that or you can download the run the executable directly.
+
+1. After buying a license from the dashboard you will be given a key. 
+
+2. Add this key to the Watchtower Agent Script as shown below
+
+```csharp
+private const string license = "<LICENSE>";
+```
+
+3. Run the program as an Administrator because it needs to access Windows Security Events in real time and this needs elevated priveleges. 
+
+4. You should see this output from the script every time a log has been sent to your dashboard successfully. 
+
+CMD output of a successful POST request:
+```batchfile
+POST request successful!
+
+```
 
 ## Usage
 
@@ -17,11 +34,7 @@ Important: must be run with Administrator privileges as reading Security Event L
 
 If you don't specify where to send the data, the script will still run. It just won't send any security related data anywhere. It will still block IP addresses that try to brute force into machines. 
 
-CMD output of a successful POST request:
-```batchfile
-POST request successful!
 
-```
 ## Future
 We are in the process of converting this script into a daemon so that it can in the background as a Windows service. The implementation will resemble CLI applications where the user can start/stop/ query the status of the program all through CMD or Powershell like the popular DNS sinkhole PiHole: https://pi-hole.net/
 
