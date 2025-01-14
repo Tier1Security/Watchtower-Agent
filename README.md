@@ -12,7 +12,7 @@ This is the agent that handles all security related events as well as blocking o
 
 1. After buying a license from the dashboard you will be given a key. 
 
-2. Add this key to the Watchtower Agent Script as shown below
+2. Add this key to the Watchtower Agent Script as shown below in line 45.
 
 ```csharp
 private const string license = "<LICENSE>";
