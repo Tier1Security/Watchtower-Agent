@@ -45,7 +45,7 @@ POST request successful!
 3. This is different from querying historical logs every x unit of time as the event's can be subscribed to in real time.
 4. When a security event happens on the machine, the script will send out a POST request to a server and the server will send back if the request is successful or not.
 
-## How it Works - Security Event Ingestion
+## How it Works - Brute Force Prevention
 
 1. The program watches for repeated password attempts, specifically Windows Event 4625 (Failed Authentication)
 2. If an IP address tries too many times (passes the threshold) then the program will add that IP address to Windows Firewall as a blocked IP.
