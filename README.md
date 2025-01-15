@@ -38,6 +38,19 @@ POST request successful!
 
 ```
 
+## How it Works - Security Event Ingestion
+
+1. The program needs to run as admin as it needs elevated privileges to listen for security events.
+2. There is a .NET library called "Systems.Collections" that allows you to programmatically listen for new security events.
+3. This is different from querying historical logs every x unit of time as the event's can be subscribed to in real time.
+4. When a security event happens on the machine, the script will send out a POST request to a server and the server will send back if the request is successful or not.
+
+## How it Works - Security Event Ingestion
+
+1. The program watches for repeated password attempts, specifically Windows Event 4625 (Failed Authentication)
+2. If an IP address tries too many times (passes the threshold) then the program will add that IP address to Windows Firewall as a blocked IP.
+3. The program can also send this information to the Tier 1 Dashboard. 
+
 ## Usage
 
 Important: must be run with Administrator privileges as reading Security Event Logs from Windows needs elevated privileges. 
