@@ -8,7 +8,15 @@ This is the agent that handles all security related events as well as blocking o
 1. Pushes security events to the cloud (will add the demo server for this soon)
 2. Blocks IP addresses by adding them to the windows firewall. This feature is working and has been tested on both Windows 10 and Windows 11 machines. 
 
-## Installation
+## Installation - Local
+
+1. You don't need a key for the program to work locally, only if you want to use the cloud based dashboard.
+  
+2. The local server is in development.
+   
+3. You can also use whatever log ingestion platform you would like.
+
+## Installation - Cloud
 
 1. After buying a license from the dashboard you will be given a key. 
 
