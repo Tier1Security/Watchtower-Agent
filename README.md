@@ -18,26 +18,6 @@ You are free to run the script by itself without a license.
    
 3. You can also use whatever log ingestion platform you would like.
 
-## Installation - Cloud
-
-1. After buying a license from the dashboard you will be given a key. 
-
-2. Add this key to the Watchtower Agent Script as shown below in line 45.
-
-```csharp
-private const string license = "<LICENSE>";
-```
-
-3. Run the program as an Administrator because it needs to access Windows Security Events in real time and this needs elevated priveleges. 
-
-4. You should see this output from the script every time a log has been sent to your dashboard successfully. 
-
-CMD output of a successful POST request:
-```batchfile
-POST request successful!
-
-```
-
 ## How it Works - Security Event Ingestion
 
 1. The program needs to run as admin as it needs elevated privileges to listen for security events.
