@@ -4,8 +4,6 @@
 
 This is the agent that handles all security related events as well as blocking of IP's that try to brute force into Windows machines. This is part of an Watchtower SIEM/IPS solution made by Tier 1 Security. It uses less than 25MB of ram and less than 1% of CPU during runtime. 
 
-You are free to run the script by itself without a license. 
-
 ## Features
 1. Pushes security events to the cloud (will add the demo server for this soon)
 2. Blocks IP addresses by adding them to the windows firewall. This feature is working and has been tested on both Windows 10 and Windows 11 machines. 
