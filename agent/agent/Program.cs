@@ -2,456 +2,725 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 
 namespace Agent
 {
     /// <summary>
-    /// Represents the payload structure for sending event data to the remote API.
+    /// The 10 categories for high-level attacks plus an Unknown fallback.
     /// </summary>
-    public class EventPayload
+    public enum HighLevelAttackType
     {
-        /// <summary>
-        /// Gets or sets the ID of the event.
-        /// </summary>
-        [JsonProperty("event_id")]
-        public int EventId { get; set; }
-
-        /// <summary>
-        /// Gets or sets the license key associated with the event.
-        /// </summary>
-        [JsonProperty("license")]
-        public string License { get; set; }
-
-        /// <summary>
-        /// Gets or sets the category number of the event.
-        /// </summary>
-        [JsonProperty("category_number")]
-        public int CategoryNumber { get; set; }
-
-        /// <summary>
-        /// Gets or sets the index (sequence number) of the log in the event log.
-        /// </summary>
-        [JsonProperty("log_index")]
-        public int LogIndex { get; set; }
-
-        /// <summary>
-        /// Gets or sets the timestamp of the event in ISO 8601 format.
-        /// </summary>
-        [JsonProperty("timestamp")]
-        public string Timestamp { get; set; }
-
-        /// <summary>
-        /// Gets or sets the IP address associated with the event.
-        /// </summary>
-        [JsonProperty("ip")]
-        public string Ip { get; set; }
-
-        /// <summary>
-        /// Gets or sets the number of failed login attempts associated with this IP address.
-        /// </summary>
-        [JsonProperty("attempts")]
-        public int Attempts { get; set; }
-
-        /// <summary>
-        /// Gets or sets the IP address that was blocked, if any.
-        /// </summary>
-        [JsonProperty("blocked_ip")]
-        public string? BlockedIp { get; set; }
+        UserCredentialBruteForcing,
+        PrivilegeEscalation,
+        LateralMovement,
+        CredentialDumping,
+        Persistence,
+        ClearingSecurityLogs,
+        RemoteDesktopAttacks,
+        UserAccountManipulation,
+        FirewallIPSecPolicyChanges,
+        TimeTamperingOrSystemIntegrity,
+        UnknownOrNotApplicable
     }
 
     /// <summary>
-    /// Program class containing the main entry point and logic for monitoring Windows Security Event Logs.
+    /// One raw "low-level" event that the aggregator collects.
     /// </summary>
-    class Program
+    public record LowLevelEvent(int EventId, DateTime TimeGenerated, string Message);
+
+    /// <summary>
+    /// Aggregator that collects raw events for a single (AttackType, CorrelationKey).
+    /// Once some threshold or time condition is reached, we finalize and send one alert.
+    /// 
+    /// This version includes an example "chain logic" for Privilege Escalation.
+    /// </summary>
+    public class HighLevelAggregator
     {
-        private const string license = "<LICENSE_KEY>";
-        private const string ApiUrl = "https://www.tier1security.org/api";
+        // The category and correlation key for which we are aggregating.
+        public HighLevelAttackType AttackType { get; }
+        public string CorrelationKey { get; }
 
-        // Threshold for failed login attempts
-        private const int FailedLoginThreshold = 5;
+        // Collected events
+        public List<LowLevelEvent> Events { get; } = new();
 
-        private static readonly HttpClient HttpClient = new HttpClient();
-        private static readonly HashSet<int> MonitoredEventIDs = new()
+        // Has this aggregator been finalized (alert sent)?
+        public bool IsComplete { get; private set; }
+
+        // The moment we created this aggregator
+        public DateTime CreatedUtc { get; }
+
+        // The moment we last received an event
+        public DateTime LastEventUtc { get; private set; }
+
+        // For concurrency, so we don't finalize the same aggregator multiple times
+        private readonly object aggregatorLock = new();
+
+        // EXAMPLE: For a multi-step sequence in "Privilege Escalation"
+        //  - step 1 means we've seen 4672
+        //  - step 2 means we've seen 4672 then 4673
+        //  - step 3 means we've seen 4672, 4673, then 4674 => finalize
+        private int _privEscalationStep = 0;
+
+        public HighLevelAggregator(HighLevelAttackType attackType, string correlationKey)
         {
-            104, 106, 201, 740, 741, 1102, 1116, 1118, 1119, 1120,
-            4624, 4625, 4634, 4647, 4648, 4656, 4672, 4697, 4698,
-            4699, 4700, 4701, 4702, 4719, 4720, 4722, 4724, 4728,
-            4732, 4738, 4756, 4768, 4769, 4771, 4776, 5001, 5140,
-            5142, 5145, 5157, 7034, 7036, 7040, 7045,
-        };
-
-        private static readonly ConcurrentDictionary<string, int> FailedLoginAttempts = new();
-        private static readonly HashSet<string> SentLogHashes = new();
-        private static readonly object LogHashLock = new();
-        private static DateTime ProgramStartTime;
-
-        /// <summary>
-        /// The main entry point for the program. Checks the API URL validity and initiates event parsing if valid.
-        /// </summary>
-        static async Task Main()
-        {
-            ProgramStartTime = DateTime.Now; // Record the program's start time
-
-            if (!IsApiUrlValid(ApiUrl))
-            {
-                Console.WriteLine("API URL is not properly set. Exiting...");
-                return;
-            }
-
-            await StartEventParsingAsync();
+            AttackType = attackType;
+            CorrelationKey = correlationKey;
+            CreatedUtc = DateTime.UtcNow;
+            LastEventUtc = CreatedUtc;
         }
 
         /// <summary>
-        /// Starts monitoring the Windows Security Event Log asynchronously and waits for user input to exit.
+        /// Add a new event. Return true if we decided to finalize now.
         /// </summary>
-        private static async Task StartEventParsingAsync()
+        public bool AddEvent(int eventId, DateTime eventTime, string message)
         {
-            using var eventLog = new EventLog("Security") { EnableRaisingEvents = true };
+            lock (aggregatorLock)
+            {
+                if (IsComplete) 
+                    return false;
 
-            eventLog.EntryWritten += async (sender, e) => await ProcessEventLogAsync(e.Entry);
+                Events.Add(new LowLevelEvent(eventId, eventTime, message));
+                LastEventUtc = DateTime.UtcNow;
 
-            Console.WriteLine("Monitoring Security event logs. Press any key to exit...");
-            await Task.Run(() => Console.ReadKey());
+                // Decide if we should finalize *right now* based on the category logic
+                return ShouldFinalize(eventId, message);
+            }
         }
 
         /// <summary>
-        /// Processes an individual EventLogEntry. Filters old events, checks for duplicates, and sends data if necessary.
+        /// This method checks (1) threshold logic, (2) chain logic, (3) single-event triggers, etc.
+        /// If the aggregator should finalize, set IsComplete=true and return true.
+        /// Otherwise return false.
+        /// 
+        /// Below are examples for:
+        ///  - User Credential Brute Forcing
+        ///  - Privilege Escalation (multi-step chain example)
+        ///  - Clearing Security Logs
+        ///  - Remote Desktop Attacks
+        ///  - Time Tampering or Single-Event detection
         /// </summary>
-        /// <param name="entry">The event log entry to process.</param>
-        private static async Task ProcessEventLogAsync(EventLogEntry entry)
+        private bool ShouldFinalize(int latestEventId, string message)
         {
-            // Ignore events that occurred before the program started
-            if (entry.TimeGenerated < ProgramStartTime)
+            switch (AttackType)
             {
-                Console.WriteLine($"Skipping old EventID: {entry.EventID}, Time: {entry.TimeGenerated}");
-                return;
-            }
-
-            if (!MonitoredEventIDs.Contains(entry.EventID))
-                return;
-
-            if (IsDuplicateLog(entry))
-            {
-                Console.WriteLine($"Duplicate log detected. Skipping EventID: {entry.EventID}, Index: {entry.Index}");
-                return;
-            }
-
-            // Handle non-failed login events immediately
-            if (entry.EventID != 4625)
-            {
-                var generalPayload = new EventPayload
+                case HighLevelAttackType.UserCredentialBruteForcing:
                 {
-                    EventId = entry.EventID,
-                    License = license,
-                    CategoryNumber = entry.CategoryNumber,
-                    LogIndex = entry.Index,
-                    Timestamp = entry.TimeGenerated.ToString("o"),
-                    Ip = string.Empty,
-                    Attempts = 0,
-                    BlockedIp = null,
-                };
+                    // If we see an account lockout (4740), finalize
+                    if (latestEventId == 4740)
+                    {
+                        IsComplete = true;
+                        return true;
+                    }
+                    // Or if we see 10 x 4625 in <= 2 minutes
+                    int failCount = 0;
+                    foreach (var e in Events)
+                    {
+                        if (e.EventId == 4625)
+                            failCount++;
+                    }
+                    if (failCount >= 10 && (DateTime.UtcNow - CreatedUtc).TotalMinutes <= 2)
+                    {
+                        IsComplete = true;
+                        return true;
+                    }
+                    break;
+                }
 
-                await SendDataAsync(generalPayload);
-            }
-
-            // Handle failed login events (EventID 4625)
-            if (entry.EventID == 4625)
-            {
-                await HandleFailedLoginAsync(entry);
-            }
-        }
-
-        /// <summary>
-        /// Checks if the given event log entry was already processed by comparing a computed hash of its contents.
-        /// </summary>
-        /// <param name="entry">The event log entry to check.</param>
-        /// <returns>True if the log has already been processed, false otherwise.</returns>
-        private static bool IsDuplicateLog(EventLogEntry entry)
-        {
-            // Compute a hash for the event
-            string logHash = ComputeLogHash(entry);
-
-            lock (LogHashLock)
-            {
-                if (SentLogHashes.Contains(logHash))
+                case HighLevelAttackType.PrivilegeEscalation:
                 {
+                    // *** Multi-step chain example ***
+                    // We want to see 4672 -> 4673 -> 4674 in that order, within 5 minutes (arbitrary).
+                    // If we reach step 3, we finalize.
+
+                    // (1) If we see 4672 and we haven't started the chain, move step to 1
+                    if (latestEventId == 4672 && _privEscalationStep == 0)
+                    {
+                        _privEscalationStep = 1;
+                    }
+                    // (2) If we see 4673 and the chain step is 1, move to step 2
+                    else if (latestEventId == 4673 && _privEscalationStep == 1)
+                    {
+                        _privEscalationStep = 2;
+                    }
+                    // (3) If we see 4674 and the chain step is 2 => finalize
+                    else if (latestEventId == 4674 && _privEscalationStep == 2)
+                    {
+                        // also check if the chain happened within 5 minutes of aggregator creation
+                        if ((DateTime.UtcNow - CreatedUtc).TotalMinutes <= 5)
+                        {
+                            IsComplete = true;
+                            return true;
+                        }
+                        else
+                        {
+                            // If it took more than 5 minutes, you can choose to finalize anyway,
+                            // or ignore. For this example, let's finalize anyway:
+                            IsComplete = true;
+                            return true;
+                        }
+                    }
+                    break;
+                }
+
+                case HighLevelAttackType.ClearingSecurityLogs:
+                {
+                    // If 1102 or 1100 => finalize immediately
+                    if (latestEventId == 1102 || latestEventId == 1100)
+                    {
+                        IsComplete = true;
+                        return true;
+                    }
+                    break;
+                }
+
+                case HighLevelAttackType.RemoteDesktopAttacks:
+                {
+                    // E.g. if 3 consecutive 4625 with "Logon Type: 10" in < 2 min
+                    int rdpFails = 0;
+                    foreach (var ev in Events)
+                    {
+                        if (ev.EventId == 4625 && ev.Message.Contains("Logon Type: 10"))
+                            rdpFails++;
+                    }
+                    if (rdpFails >= 3 && (DateTime.UtcNow - CreatedUtc).TotalMinutes <= 2)
+                    {
+                        IsComplete = true;
+                        return true;
+                    }
+                    break;
+                }
+
+                case HighLevelAttackType.TimeTamperingOrSystemIntegrity:
+                {
+                    // For simplicity, finalize on the first event
+                    IsComplete = true;
                     return true;
                 }
 
-                SentLogHashes.Add(logHash);
+                default:
+                    // For other categories, you might add other chain logic or finalize rules
+                    break;
+            }
 
-                // Prevent memory bloat by limiting the size of the hash set
-                if (SentLogHashes.Count > 5000)
-                {
-                    SentLogHashes.Clear();
-                }
+            return false;
+        }
 
-                return false;
+        /// <summary>
+        /// Force finalization, e.g. if aggregator is stale or a time limit is reached,
+        /// even if we haven't triggered "ShouldFinalize" from a direct event.
+        /// </summary>
+        public bool ForceFinalize()
+        {
+            lock (aggregatorLock)
+            {
+                if (IsComplete)
+                    return false;
+
+                IsComplete = true;
+                return true;
             }
         }
+    }
+
+    /// <summary>
+    /// The final alert payload representing a single high-level attack with multiple low-level events.
+    /// </summary>
+    public class HighLevelAlertPayload
+    {
+        [JsonProperty("license")]
+        public string License { get; set; }
+
+        [JsonProperty("high_level_event")]
+        public string HighLevelEvent { get; set; }
+
+        [JsonProperty("correlation_key")]
+        public string CorrelationKey { get; set; }
+
+        [JsonProperty("event_count")]
+        public int EventCount { get; set; }
+
+        [JsonProperty("events")]
+        public List<LowLevelAlert> Events { get; set; } = new();
+    }
+
+    /// <summary>
+    /// One low-level event within the final aggregator alert, truncated for readability.
+    /// </summary>
+    public class LowLevelAlert
+    {
+        [JsonProperty("event_id")]
+        public int EventId { get; set; }
+
+        [JsonProperty("time")]
+        public string Time { get; set; }
+
+        [JsonProperty("message_snippet")]
+        public string MessageSnippet { get; set; }
+    }
+
+    /// <summary>
+    /// Manages aggregator objects, keyed by (AttackType, correlationKey).
+    /// Also does periodic cleanup of stale aggregators.
+    /// 
+    /// Includes a chain-based aggregator approach for "Privilege Escalation" 
+    /// as an example. You can add more chain logic for other categories similarly.
+    /// </summary>
+    public static class HighLevelAttackManager
+    {
+        // Key = (AttackType, correlationKey)
+        private static readonly ConcurrentDictionary<(HighLevelAttackType, string), HighLevelAggregator> Aggregators
+            = new();
+
+        private static Timer cleanupTimer;
+
+        // How often we run aggregator cleanup
+        private static readonly TimeSpan CleanupInterval = TimeSpan.FromMinutes(1);
+
+        // How long we wait before finalizing or discarding aggregator if no new events
+        private static readonly TimeSpan MaxAggregatorLifetime = TimeSpan.FromMinutes(5);
 
         /// <summary>
-        /// Computes a SHA-256 hash for the event log entry.
+        /// Initialize the cleanup timer once. Call this e.g. from Program.Main.
         /// </summary>
-        /// <param name="entry">The event log entry for which to compute the hash.</param>
-        /// <returns>A Base64 string representation of the event log hash.</returns>
-        private static string ComputeLogHash(EventLogEntry entry)
+        public static void StartCleanupTimer()
         {
-            using var sha256 = SHA256.Create();
-            string logData = $"{entry.Index}-{entry.TimeGenerated}-{entry.EventID}-{entry.Message}";
-            byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(logData));
-            return Convert.ToBase64String(hashBytes);
+            cleanupTimer = new Timer(_ => CleanupStaleAggregators(), null, CleanupInterval, CleanupInterval);
         }
 
         /// <summary>
-        /// Handles a failed login event by extracting the IP, incrementing its failed count, and optionally blocking it.
+        /// Stop the cleanup timer if needed. For graceful shutdown.
         /// </summary>
-        /// <param name="entry">The failed login event log entry.</param>
-        private static async Task HandleFailedLoginAsync(EventLogEntry entry)
+        public static void StopCleanupTimer()
         {
-            string ipAddress = ExtractIPAddress(entry.Message);
+            cleanupTimer?.Dispose();
+        }
 
-            if (string.IsNullOrEmpty(ipAddress) || !IPAddress.TryParse(ipAddress, out _))
+        /// <summary>
+        /// Primary entry point to handle a new event. 
+        /// 1) Retrieve or create aggregator for (attackType, correlationKey). 
+        /// 2) Add the event. 
+        /// 3) If aggregator finalizes, we send one alert and remove it.
+        /// </summary>
+        public static async Task HandleEventAsync(
+            HighLevelAttackType attackType,
+            string correlationKey,
+            int eventId,
+            DateTime eventTime,
+            string message)
+        {
+            if (attackType == HighLevelAttackType.UnknownOrNotApplicable)
             {
-                Console.WriteLine($"Invalid or missing IP address in event {entry.Index}.");
+                // We skip events that do not map to the 10 recognized categories
                 return;
             }
 
-            lock (FailedLoginAttempts)
+            var aggregator = Aggregators.GetOrAdd(
+                (attackType, correlationKey),
+                _ => new HighLevelAggregator(attackType, correlationKey));
+
+            bool aggregatorIsComplete = aggregator.AddEvent(eventId, eventTime, message);
+
+            if (aggregatorIsComplete)
             {
-                IncrementFailedLoginAttempt(ipAddress);
+                await FinalizeAndRemoveAggregator((attackType, correlationKey));
             }
+        }
 
-            int attempts = FailedLoginAttempts[ipAddress];
-            bool shouldBlock = attempts >= FailedLoginThreshold && !IsLocalhost(ipAddress);
-
-            if (shouldBlock && BlockIp(ipAddress))
+        /// <summary>
+        /// Checks all aggregators for staleness (no new events after X minutes).
+        /// If stale, finalize or optionally discard them.
+        /// </summary>
+        private static void CleanupStaleAggregators()
+        {
+            foreach (var kvp in Aggregators)
             {
-                lock (FailedLoginAttempts)
+                var key = kvp.Key;
+                var aggregator = kvp.Value;
+
+                if (aggregator.IsComplete)
                 {
-                    FailedLoginAttempts[ipAddress] = 0;
+                    // Already done, just remove if it wasn't removed for some reason
+                    Aggregators.TryRemove(key, out _);
+                    continue;
                 }
 
-                var eventPayload = new EventPayload
+                // If aggregator is older than MaxAggregatorLifetime with no new events,
+                // we finalize it. Or you can choose to discard it if you prefer.
+                if (DateTime.UtcNow - aggregator.LastEventUtc > MaxAggregatorLifetime)
                 {
-                    EventId = 4625,
-                    License = license,
-                    CategoryNumber = entry.CategoryNumber,
-                    LogIndex = entry.Index,
-                    Timestamp = entry.TimeGenerated.ToString("o"),
-                    Ip = ipAddress,
-                    Attempts = attempts,
-                    BlockedIp = ipAddress,
-                };
-
-                Console.WriteLine($"IP {ipAddress} has been blocked after {attempts} failed attempts.");
-                await SendDataAsync(eventPayload);
-            }
-            else
-            {
-                var eventPayload = new EventPayload
-                {
-                    EventId = 4625,
-                    License = license,
-                    CategoryNumber = entry.CategoryNumber,
-                    LogIndex = entry.Index,
-                    Timestamp = entry.TimeGenerated.ToString("o"),
-                    Ip = ipAddress,
-                    Attempts = attempts,
-                    BlockedIp = null,
-                };
-
-                Console.WriteLine($"Failed login attempt {attempts} for IP {ipAddress}.");
-                await SendDataAsync(eventPayload);
-            }
-        }
-
-        /// <summary>
-        /// Increments the failed login attempt count for the specified IP address.
-        /// </summary>
-        /// <param name="ipAddress">The IP address for which to increment the failed attempt count.</param>
-        private static void IncrementFailedLoginAttempt(string ipAddress)
-        {
-            FailedLoginAttempts.AddOrUpdate(ipAddress, 1, (_, oldValue) => oldValue + 1);
-        }
-
-        /// <summary>
-        /// Checks if the given IP address is a localhost address.
-        /// </summary>
-        /// <param name="ipAddress">The IP address to check.</param>
-        /// <returns>True if the IP address is localhost, false otherwise.</returns>
-        private static bool IsLocalhost(string ipAddress) =>
-            ipAddress == "127.0.0.1" || ipAddress == "::1";
-
-        /// <summary>
-        /// Extracts an IP address from the event message using a regular expression.
-        /// </summary>
-        /// <param name="message">The message from which to extract the IP address.</param>
-        /// <returns>The extracted IP address, or null if none was found.</returns>
-        private static string ExtractIPAddress(string message)
-        {
-            const string ipPattern = @"(?<=Source Network Address:\s)([^\s]+)";
-            var match = Regex.Match(message, ipPattern);
-            return match.Success ? match.Value : null;
-        }
-
-        /// <summary>
-        /// Blocks the specified IP address using Windows Firewall rules, if it is not already blocked.
-        /// </summary>
-        /// <param name="ipAddress">The IP address to block.</param>
-        /// <returns>True if the IP was successfully blocked, false otherwise.</returns>
-        private static bool BlockIp(string ipAddress)
-        {
-            if (IsIpBlocked(ipAddress))
-            {
-                Console.WriteLine($"IP {ipAddress} is already blocked. Skipping rule creation.");
-                return false;
-            }
-
-            if (!IPAddress.TryParse(ipAddress, out _))
-            {
-                Console.WriteLine("Invalid IP address. Not blocking.");
-                return false;
-            }
-
-            string command = $"netsh advfirewall firewall add rule name=\"Block {ipAddress}\" dir=in action=block remoteip={ipAddress}";
-            return ExecuteCommand(command);
-        }
-
-        /// <summary>
-        /// Checks whether the given IP address is already blocked by querying Windows Firewall rules.
-        /// </summary>
-        /// <param name="ipAddress">The IP address to check.</param>
-        /// <returns>True if the IP address is already blocked, false otherwise.</returns>
-        private static bool IsIpBlocked(string ipAddress)
-        {
-            string checkCommand = $"netsh advfirewall firewall show rule name=all | findstr \"{ipAddress}\"";
-            string output = ExecuteCommandWithOutput(checkCommand);
-            return !string.IsNullOrEmpty(output);
-        }
-
-        /// <summary>
-        /// Executes a command silently using cmd.exe without capturing output.
-        /// </summary>
-        /// <param name="command">The command to execute.</param>
-        /// <returns>True if the command executed successfully, false otherwise.</returns>
-        private static bool ExecuteCommand(string command)
-        {
-            try
-            {
-                using var process = new Process
-                {
-                    StartInfo = new ProcessStartInfo("cmd.exe", "/C " + command)
+                    bool forced = aggregator.ForceFinalize();
+                    if (forced)
                     {
-                        WindowStyle = ProcessWindowStyle.Hidden,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                    },
-                };
-
-                process.Start();
-                process.WaitForExit();
-                return process.ExitCode == 0;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Command execution failed: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Executes a command silently using cmd.exe and captures the standard output.
-        /// </summary>
-        /// <param name="command">The command to execute.</param>
-        /// <returns>The standard output from the command, or an empty string if an error occurred.</returns>
-        private static string ExecuteCommandWithOutput(string command)
-        {
-            try
-            {
-                using var process = new Process
-                {
-                    StartInfo = new ProcessStartInfo("cmd.exe", "/C " + command)
+                        // aggregator was not yet complete, so now we finalize
+                        _ = FinalizeAndRemoveAggregator(key); 
+                        // We can discard the Task because finalization is asynchronous
+                    }
+                    else
                     {
-                        WindowStyle = ProcessWindowStyle.Hidden,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true,
-                    },
-                };
-
-                process.Start();
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-                return output;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Command execution with output failed: {ex.Message}");
-                return string.Empty;
+                        // aggregator was already complete or forcibly completed by something else
+                        Aggregators.TryRemove(key, out _);
+                    }
+                }
             }
         }
 
         /// <summary>
-        /// Sends event data asynchronously to the configured API endpoint.
+        /// Finalize aggregator => build alert => send => remove from dictionary.
         /// </summary>
-        /// <param name="payload">The event payload to send.</param>
-        private static async Task SendDataAsync(EventPayload payload)
+        private static async Task FinalizeAndRemoveAggregator((HighLevelAttackType, string) key)
         {
-            if (string.IsNullOrEmpty(ApiUrl))
+            if (!Aggregators.TryGetValue(key, out var aggregator))
+                return; // race condition: aggregator might have been removed
+
+            var payload = BuildHighLevelAlertPayload(aggregator);
+            await SendAggregatedAlertAsync(payload);
+
+            // remove aggregator from dictionary
+            Aggregators.TryRemove(key, out _);
+        }
+
+        private static HighLevelAlertPayload BuildHighLevelAlertPayload(HighLevelAggregator aggregator)
+        {
+            var payload = new HighLevelAlertPayload
             {
-                Console.WriteLine("API URL is not set. Data will not be sent.");
+                License        = Program.license,
+                HighLevelEvent = aggregator.AttackType.ToString(),
+                CorrelationKey = aggregator.CorrelationKey,
+                EventCount     = aggregator.Events.Count
+            };
+
+            foreach (var e in aggregator.Events)
+            {
+                payload.Events.Add(new LowLevelAlert
+                {
+                    EventId = e.EventId,
+                    Time    = e.TimeGenerated.ToString("o"),
+                    MessageSnippet = e.Message.Length > 100
+                        ? e.Message[..100] + "..."
+                        : e.Message
+                });
+            }
+
+            return payload;
+        }
+
+        private static async Task SendAggregatedAlertAsync(HighLevelAlertPayload payload)
+        {
+            if (string.IsNullOrEmpty(Program.ApiUrl))
+            {
+                Console.WriteLine("API URL not set. Cannot send aggregator alert.");
                 return;
             }
 
             try
             {
                 string jsonData = JsonConvert.SerializeObject(payload);
-                var content = new StringContent(jsonData, Encoding.UTF8, "application/json");
-                var response = await HttpClient.PostAsync(ApiUrl, content);
+                using var content = new StringContent(jsonData, Encoding.UTF8, "application/json");
 
+                var response = await Program.HttpClient.PostAsync(Program.ApiUrl, content);
                 if (!response.IsSuccessStatusCode)
                 {
-                    string responseBody = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine($"POST request failed for event_id {payload.EventId}: {response.StatusCode} - {responseBody}");
+                    string resp = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"[ERROR] POST aggregator alert failed: {resp}");
                 }
                 else
                 {
-                    Console.WriteLine($"POST request successful for event_id {payload.EventId}!");
+                    Console.WriteLine($"[ALERT SENT] {payload.HighLevelEvent}, " +
+                                      $"Key={payload.CorrelationKey}, " +
+                                      $"Count={payload.EventCount}");
                 }
-            }
-            catch (HttpRequestException ex)
-            {
-                Console.WriteLine($"HTTP Request Exception for event_id {payload.EventId}: {ex.Message}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Exception occurred for event_id {payload.EventId}: {ex.Message}\n{ex.StackTrace}");
+                Console.WriteLine($"Exception sending aggregator alert: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// The main Program that listens to Windows Security logs, only processes recognized events,
+    /// and uses the HighLevelAttackManager to handle aggregator logic (including chain logic).
+    /// </summary>
+    public class Program
+    {
+        // *** CONFIG: Your license key, your API endpoint, etc. ***
+        public const string license = "<LICENSE_KEY>";
+        public const string ApiUrl = "https://www.tier1security.org/api";
+
+        public static readonly HttpClient HttpClient = new HttpClient();
+        private static DateTime ProgramStartTime;
+
+        private static readonly object LogHashLock = new();
+        private static readonly HashSet<string> ProcessedLogHashes = new();
+
+        // This dictionary helps us quickly identify if an event ID might belong to one of the 10 categories
+        // (except for special logic like "4625 with Logon Type: 10" => RemoteDesktopAttacks).
+        private static readonly Dictionary<int, HighLevelAttackType> SimpleEventIdMap = new()
+        {
+            // 1) User Credential Brute Forcing
+            { 4625, HighLevelAttackType.UserCredentialBruteForcing },
+            { 4740, HighLevelAttackType.UserCredentialBruteForcing },
+            { 4771, HighLevelAttackType.UserCredentialBruteForcing },
+
+            // 2) Privilege Escalation
+            { 4672, HighLevelAttackType.PrivilegeEscalation },
+            { 4673, HighLevelAttackType.PrivilegeEscalation },
+            { 4674, HighLevelAttackType.PrivilegeEscalation },
+            { 4697, HighLevelAttackType.PrivilegeEscalation },
+            { 4728, HighLevelAttackType.PrivilegeEscalation },
+            { 4732, HighLevelAttackType.PrivilegeEscalation },
+            { 4756, HighLevelAttackType.PrivilegeEscalation },
+
+            // 3) Lateral Movement
+            { 4624, HighLevelAttackType.LateralMovement },
+            { 5140, HighLevelAttackType.LateralMovement },
+            { 5145, HighLevelAttackType.LateralMovement },
+
+            // 4) Credential Dumping
+            { 4688, HighLevelAttackType.CredentialDumping },
+            { 4663, HighLevelAttackType.CredentialDumping },
+            { 4656, HighLevelAttackType.CredentialDumping },
+            { 4658, HighLevelAttackType.CredentialDumping },
+
+            // 5) Persistence
+            { 4698, HighLevelAttackType.Persistence },
+            { 4699, HighLevelAttackType.Persistence },
+            { 4702, HighLevelAttackType.Persistence },
+            { 7045, HighLevelAttackType.Persistence },
+
+            // 6) Clearing Security Logs
+            { 1102, HighLevelAttackType.ClearingSecurityLogs },
+            { 1100, HighLevelAttackType.ClearingSecurityLogs },
+
+            // 7) Remote Desktop Attacks
+            // (4625 or 4624 can also become RemoteDesktopAttacks if "Logon Type: 10" => see special check)
+            { 4825, HighLevelAttackType.RemoteDesktopAttacks },
+
+            // 8) User Account Manipulation
+            { 4720, HighLevelAttackType.UserAccountManipulation },
+            { 4722, HighLevelAttackType.UserAccountManipulation },
+            { 4723, HighLevelAttackType.UserAccountManipulation },
+            { 4724, HighLevelAttackType.UserAccountManipulation },
+            { 4725, HighLevelAttackType.UserAccountManipulation },
+
+            // 9) Firewall / IPSec
+            { 4946, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 4947, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 4948, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5050, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5051, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5056, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5057, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5025, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5026, HighLevelAttackType.FirewallIPSecPolicyChanges },
+            { 5027, HighLevelAttackType.FirewallIPSecPolicyChanges },
+
+            // 10) Time Tampering / System Integrity
+            { 4616, HighLevelAttackType.TimeTamperingOrSystemIntegrity },
+            { 5038, HighLevelAttackType.TimeTamperingOrSystemIntegrity },
+            { 5039, HighLevelAttackType.TimeTamperingOrSystemIntegrity },
+            { 6281, HighLevelAttackType.TimeTamperingOrSystemIntegrity }
+        };
+
+        // Any Windows Security events you want to watch
+        // (only those that might appear in your 10 categories or have special logic).
+        private static readonly HashSet<int> MonitoredEventIDs = new()
+        {
+            4624, 4625, 4740, 4771,
+            4672, 4673, 4674, 4697, 4728, 4732, 4756,
+            5140, 5145,
+            4688, 4663, 4656, 4658,
+            4698, 4699, 4702, 7045,
+            1100, 1102,
+            4825,
+            4720, 4722, 4723, 4724, 4725,
+            4946, 4947, 4948, 5050, 5051, 5056, 5057, 5025, 5026, 5027,
+            4616, 5038, 5039, 6281
+        };
+
+        public static async Task Main()
+        {
+            ProgramStartTime = DateTime.Now;
+
+            // Start aggregator cleanup in the background
+            HighLevelAttackManager.StartCleanupTimer();
+
+            // Validate API
+            if (!IsApiUrlValid(ApiUrl))
+            {
+                Console.WriteLine("API URL is not properly set. Exiting...");
+                return;
+            }
+
+            // Start reading the Security event log
+            await StartEventParsingAsync();
+
+            // Optionally, if you want a graceful shutdown, stop the timer
+            HighLevelAttackManager.StopCleanupTimer();
+        }
+
+        private static async Task StartEventParsingAsync()
+        {
+            using var eventLog = new EventLog("Security")
+            {
+                EnableRaisingEvents = true
+            };
+
+            eventLog.EntryWritten += async (sender, args) =>
+            {
+                await ProcessEventLogAsync(args.Entry);
+            };
+
+            Console.WriteLine("Monitoring Security event logs. Press any key to exit...");
+            await Task.Run(() => Console.ReadKey());
+        }
+
+        private static async Task ProcessEventLogAsync(EventLogEntry entry)
+        {
+            // Skip events before program start
+            if (entry.TimeGenerated < ProgramStartTime)
+                return;
+
+            // Skip if not in the monitored set
+            if (!MonitoredEventIDs.Contains(entry.EventID))
+                return;
+
+            // Skip duplicates
+            if (IsDuplicateLog(entry))
+                return;
+
+            // Identify the high-level category
+            var category = DetermineCategory(entry.EventID, entry.Message);
+            if (category == HighLevelAttackType.UnknownOrNotApplicable)
+            {
+                // We skip events that do not map to the 10 recognized categories
+                return;
+            }
+
+            // Build correlation key (e.g. user or IP)
+            string correlationKey = ComputeCorrelationKey(category, entry);
+
+            // Pass to aggregator manager
+            await HighLevelAttackManager.HandleEventAsync(
+                category,
+                correlationKey,
+                entry.EventID,
+                entry.TimeGenerated,
+                entry.Message
+            );
         }
 
         /// <summary>
-        /// Checks if the provided URL is valid (non-empty, well-formed, and uses HTTP or HTTPS).
+        /// Deduplicate logs by hashing the combination of index/time/EventID/message.
         /// </summary>
-        /// <param name="url">The API URL to validate.</param>
-        /// <returns>True if the URL is valid, false otherwise.</returns>
+        private static bool IsDuplicateLog(EventLogEntry entry)
+        {
+            string hash = ComputeLogHash(entry);
+            lock (LogHashLock)
+            {
+                if (ProcessedLogHashes.Contains(hash))
+                    return true;
+
+                ProcessedLogHashes.Add(hash);
+                if (ProcessedLogHashes.Count > 5000)
+                {
+                    // Simple memory control: clear if large
+                    ProcessedLogHashes.Clear();
+                }
+            }
+            return false;
+        }
+
+        private static string ComputeLogHash(EventLogEntry entry)
+        {
+            using var sha256 = SHA256.Create();
+            string raw = $"{entry.Index}-{entry.TimeGenerated}-{entry.EventID}-{entry.Message}";
+            var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(raw));
+            return Convert.ToBase64String(bytes);
+        }
+
+        /// <summary>
+        /// Decide which category an event belongs to, including special logic for 4624/4625 with "Logon Type: 10".
+        /// </summary>
+        private static HighLevelAttackType DetermineCategory(int eventId, string message)
+        {
+            // Overlap logic: 4625 or 4624 might be remote desktop if "Logon Type: 10" is in the message
+            if ((eventId == 4625 || eventId == 4624) && message.Contains("Logon Type: 10"))
+            {
+                return HighLevelAttackType.RemoteDesktopAttacks;
+            }
+
+            // Otherwise, see if it's in our dictionary
+            if (SimpleEventIdMap.TryGetValue(eventId, out var cat))
+                return cat;
+
+            return HighLevelAttackType.UnknownOrNotApplicable;
+        }
+
+        /// <summary>
+        /// For each category, decide how we want to group events (by user, by IP, etc.).
+        /// </summary>
+        private static string ComputeCorrelationKey(HighLevelAttackType category, EventLogEntry entry)
+        {
+            switch (category)
+            {
+                case HighLevelAttackType.UserCredentialBruteForcing:
+                {
+                    // Possibly correlate by target user
+                    var user = ExtractUserName(entry.Message);
+                    return string.IsNullOrEmpty(user) ? "unknown_user" : user;
+                }
+                case HighLevelAttackType.RemoteDesktopAttacks:
+                {
+                    // Possibly correlate by IP
+                    var ip = ExtractIPAddress(entry.Message);
+                    return string.IsNullOrEmpty(ip) ? "unknown_ip" : ip;
+                }
+                case HighLevelAttackType.PrivilegeEscalation:
+                {
+                    // Possibly correlate by user
+                    var user = ExtractUserName(entry.Message);
+                    return string.IsNullOrEmpty(user) ? "unknown_user" : user;
+                }
+                default:
+                {
+                    // Some fallback
+                    return "generic_key";
+                }
+            }
+        }
+
+        private static string ExtractUserName(string message)
+        {
+            // Rough example. Adjust as needed for your environment.
+            var match = Regex.Match(message, @"Account Name:\s+(.+)");
+            return match.Success ? match.Groups[1].Value.Trim() : null;
+        }
+
+        private static string ExtractIPAddress(string message)
+        {
+            // Example pattern from your original code
+            const string ipPattern = @"(?<=Source Network Address:\s)([^\s]+)";
+            var match = Regex.Match(message, ipPattern);
+            return match.Success ? match.Value : null;
+        }
+
         private static bool IsApiUrlValid(string url)
         {
             if (string.IsNullOrWhiteSpace(url))
                 return false;
-
             if (Uri.TryCreate(url, UriKind.Absolute, out var uriResult))
             {
-                return uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps;
+                return (uriResult.Scheme == Uri.UriSchemeHttp ||
+                        uriResult.Scheme == Uri.UriSchemeHttps);
             }
-
             return false;
         }
     }
